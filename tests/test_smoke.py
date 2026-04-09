@@ -194,6 +194,119 @@ def test_agent_loop_with_tool_call(tmp_path):
     assert tool_event["result"] == "echo: hi"
 
 
+def test_agent_loop_intercepts_duplicate_tool_calls(tmp_path):
+    """If the model repeats a tool call from the previous step, we intercept
+    it and feed back a stop message instead of dispatching again.
+
+    This guards against a small-model failure pattern where the model writes
+    the result correctly but keeps re-writing it forever instead of producing
+    a terminal text-only reply.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    # Track how many times the real tool function actually runs.
+    call_count = {"n": 0}
+
+    def counting_tool(workspace, message=""):
+        call_count["n"] += 1
+        return f"echo: {message}"
+
+    spec = ToolSpec(
+        name="echo",
+        func=counting_tool,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "echo",
+                "description": "Echo a message",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"message": {"type": "string"}},
+                    "required": ["message"],
+                },
+            },
+        },
+    )
+
+    fake_llm = FakeLLM(
+        [
+            # Step 1: legitimate tool call
+            LLMResponse(
+                text="",
+                tool_calls=[ToolCall(id="c1", name="echo", arguments={"message": "hi"})],
+                raw={},
+            ),
+            # Step 2: SAME tool call again (the model is stuck)
+            LLMResponse(
+                text="",
+                tool_calls=[ToolCall(id="c2", name="echo", arguments={"message": "hi"})],
+                raw={},
+            ),
+            # Step 3: model finally produces a text reply
+            LLMResponse(text="ok done", tool_calls=[], raw={}),
+        ]
+    )
+
+    registry = ToolRegistry()
+    registry.register(spec)
+    loop = AgentLoop(llm=fake_llm, tools=registry, memory=NoMemory())
+
+    task = Task(prompt="echo hi", model="fake/test", workspace_path=str(workspace))
+
+    final = loop.run(task)
+    assert final == "ok done"
+    # The actual tool function should have run exactly ONCE, even though the
+    # model emitted two identical tool calls. The second was intercepted.
+    assert call_count["n"] == 1
+
+    # The trace should have an intercepted_duplicate marker.
+    trace_lines = task.trace_path.read_text().strip().splitlines()
+    events = [json.loads(line) for line in trace_lines]
+    intercepted = [e for e in events if e.get("intercepted_duplicate")]
+    assert len(intercepted) == 1
+    assert "STOP" in intercepted[0]["result"]
+
+
+def test_agent_loop_allows_same_tool_with_different_args(tmp_path):
+    """Calling the same tool twice with different args is fine."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    fake_llm = FakeLLM(
+        [
+            LLMResponse(
+                text="",
+                tool_calls=[ToolCall(id="c1", name="echo", arguments={"message": "first"})],
+                raw={},
+            ),
+            LLMResponse(
+                text="",
+                tool_calls=[ToolCall(id="c2", name="echo", arguments={"message": "second"})],
+                raw={},
+            ),
+            LLMResponse(text="done", tool_calls=[], raw={}),
+        ]
+    )
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool_spec())
+    loop = AgentLoop(llm=fake_llm, tools=registry, memory=NoMemory())
+    task = Task(prompt="x", model="fake/test", workspace_path=str(workspace))
+
+    final = loop.run(task)
+    assert final == "done"
+
+    # Both tool calls should have run (different args = not duplicates).
+    trace_lines = task.trace_path.read_text().strip().splitlines()
+    events = [json.loads(line) for line in trace_lines]
+    tool_events = [e for e in events if e["type"] == "tool_call"]
+    assert len(tool_events) == 2
+    assert all(not e.get("intercepted_duplicate") for e in tool_events)
+    assert tool_events[0]["result"] == "echo: first"
+    assert tool_events[1]["result"] == "echo: second"
+
+
 def test_agent_loop_handles_unknown_tool(tmp_path):
     """Unknown tool calls return an error string but don't crash the loop."""
     workspace = tmp_path / "ws"

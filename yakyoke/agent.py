@@ -25,23 +25,43 @@ from yakyoke.tools.registry import ToolRegistry
 
 DEFAULT_SYSTEM_PROMPT = """\
 You are an autonomous task-execution agent running inside the yakyoke daemon.
-You have been given a task to complete. You have access to a set of tools to
-help you do it.
+Your job is to complete the user's task in as few steps as possible.
 
-Guidelines:
-- Think step by step. Decide what you need, call tools to get it, then use
-  the results to make progress.
-- When you have completed the task, write your final result to a file inside
-  the workspace using the filesystem_write tool. Use a sensible filename like
-  result.md unless the task specifies otherwise.
-- After writing the final result, produce a brief textual summary of what you
-  did. That textual reply (with no tool calls) ends the task.
-- Be concise. Don't narrate every step in your text; the trace already
-  records everything.
-- If a tool returns an error, read it carefully and try a different approach.
-  Don't repeat the same failing call.
+== CRITICAL RULES ==
+
+1. NEVER call the same tool with the same arguments twice. If a tool call
+   succeeded once, the work is DONE. Calling it again is forbidden and
+   wastes effort.
+
+2. To END the task, you must produce an assistant message containing only
+   plain-text content in the message content field, with NO function calls
+   and NO tool_calls. Just write your summary as the message content. This
+   is how the task terminates.
+
+3. There is NO tool named "text_reply", "respond", "answer", "summarize",
+   or anything similar. Do not invent tool names. The ONLY way to finish
+   the task is to write plain text into your message content with the
+   tool_calls field empty.
+
+4. When filesystem_write returns a message like "wrote N chars to result.md",
+   the file is SAVED. You do NOT need to call filesystem_write again.
+
+== PROCESS ==
+
+1. Think about what information you need.
+2. Call tools to gather it (web_search, fetch_url, filesystem_read, etc.).
+3. Synthesize a final result.
+4. Save the result with filesystem_write (ONCE).
+5. Produce one final assistant message: plain text content, no tool_calls,
+   summarizing what you did. This ends the task.
+
+== OTHER GUIDELINES ==
+
+- Be concise. The execution trace records every step; do not narrate.
+- If a tool returns an error, read it carefully and try a DIFFERENT approach.
+  Do not repeat a failing call with the same arguments.
 - If you genuinely cannot complete the task, say so plainly in your final
-  reply rather than fabricating an answer.
+  message rather than fabricating an answer.
 """
 
 
@@ -117,6 +137,16 @@ class AgentLoop:
             {"role": "user", "content": task.prompt},
         ]
 
+        # Track every successful tool call signature across the whole run.
+        # If the model emits a call whose (name, args) exactly matches any
+        # earlier successful call, we intercept it instead of re-dispatching
+        # and feed back a "you already did this, stop" message. This catches
+        # a common small-model failure pattern where the model writes the
+        # result successfully but then keeps re-writing it (or wandering
+        # through other already-done calls) instead of producing a terminal
+        # plain-text message.
+        seen_call_signatures: set[tuple[str, str]] = set()
+
         for step in range(1, task.max_steps + 1):
             t0 = time.monotonic()
             response = self.llm.complete(
@@ -149,7 +179,35 @@ class AgentLoop:
 
             # Dispatch tool calls and append their results.
             for tc in response.tool_calls:
-                result_text = self._dispatch_tool(tc, workspace, trace, step)
+                sig = self._call_signature(tc)
+
+                if sig in seen_call_signatures:
+                    # Duplicate of an earlier successful call anywhere in
+                    # this run. Don't re-run the tool; tell the model to
+                    # produce a plain-text terminal message instead.
+                    result_text = (
+                        f"STOP: you already called {tc.name} with these "
+                        f"exact arguments earlier in this task and it "
+                        f"succeeded. The work is done. To finish the task, "
+                        f"write a plain-text message in the content field "
+                        f"with NO tool_calls and NO function calls. Do not "
+                        f"invent tool names. Just write your summary as "
+                        f"message content."
+                    )
+                    trace.log(
+                        "tool_call",
+                        step=step,
+                        name=tc.name,
+                        arguments=tc.arguments,
+                        result=result_text,
+                        success=False,
+                        intercepted_duplicate=True,
+                        elapsed_ms=0,
+                    )
+                else:
+                    result_text = self._dispatch_tool(tc, workspace, trace, step)
+                    seen_call_signatures.add(sig)
+
                 messages.append(
                     {
                         "role": "tool",
@@ -160,6 +218,15 @@ class AgentLoop:
 
         trace.log("error", reason="max_steps_exceeded")
         raise RuntimeError(f"agent exceeded max_steps={task.max_steps}")
+
+    @staticmethod
+    def _call_signature(tc: ToolCall) -> tuple[str, str]:
+        """Stable signature for duplicate detection.
+
+        JSON-encodes the arguments with sorted keys so two calls with the
+        same args in different dict orders compare equal.
+        """
+        return (tc.name, json.dumps(tc.arguments, sort_keys=True, default=str))
 
     def _assistant_message(self, response: LLMResponse) -> dict[str, Any]:
         """Build the assistant message to append to history.
