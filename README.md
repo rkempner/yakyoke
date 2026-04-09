@@ -69,6 +69,7 @@ yakyoke trace <id>          print the JSONL execution trace
 yakyoke result <id>         print the task's result file
 yakyoke cancel <id>         cancel a task
 yakyoke health              check daemon liveness
+yakyoke token               generate a fresh bearer token (for YAKYOKE_API_TOKEN)
 ```
 
 `yk` is a short alias for `yakyoke`.
@@ -99,9 +100,40 @@ loaded):
 | `YAKYOKE_HOST`          | `127.0.0.1`           | HTTP bind host |
 | `YAKYOKE_PORT`          | `8765`                | HTTP bind port |
 | `YAKYOKE_MAX_STEPS`     | `12`                  | Cap on agent loop iterations per task |
+| `YAKYOKE_API_TOKEN`     | (none)                | Bearer token. If set, all task routes require `Authorization: Bearer <token>`. Generate with `yakyoke token`. |
 | `ANTHROPIC_API_KEY`     | (none)                | Required for Claude models |
 | `OPENAI_API_KEY`        | (none)                | Required for OpenAI models |
 | `OLLAMA_API_BASE`       | `http://localhost:11434` | Where LiteLLM finds Ollama |
+
+## Auth model
+
+By default the daemon binds to `127.0.0.1` and runs **unauthenticated**. This
+is safe for the intended scope: a single-user laptop where only local
+processes talk to the daemon. It is the same trust model as Ollama, the
+Docker socket, and most local dev tools.
+
+If you want belt-and-suspenders, or you ever bind to a non-localhost
+interface, set a bearer token:
+
+```bash
+# Generate a fresh token
+yakyoke token
+# -> 8K3pJ_x9-RandomUrlSafeString...
+
+# Put it in your .env (and never commit .env)
+echo "YAKYOKE_API_TOKEN=8K3pJ_x9-..." >> .env
+
+# Restart the daemon. Any shell that runs the CLI also needs the same value.
+export YAKYOKE_API_TOKEN="8K3pJ_x9-..."
+```
+
+When set, every task route requires `Authorization: Bearer <token>`. The
+`/health` endpoint stays open so liveness checks work without credentials.
+Token comparison is constant-time.
+
+The token, like all secrets, lives in environment variables (or a `.env`
+file that is gitignored). It never appears in source code, in messages
+sent to the LLM, or in committed files.
 
 ## Architecture
 

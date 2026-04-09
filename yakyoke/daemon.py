@@ -15,10 +15,11 @@ In v0.1 the daemon also starts a background worker thread, so a single
 from __future__ import annotations
 
 import logging
+import secrets as _secrets
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -107,6 +108,30 @@ def create_app(config: Config | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # ----- auth dependency -----
+    # If YAKYOKE_API_TOKEN is set, every task route requires
+    # `Authorization: Bearer <token>`. /health stays open so liveness checks
+    # work without credentials. Comparison is constant-time to defeat timing
+    # attacks. The token itself is never logged or echoed back.
+    def require_auth(authorization: str | None = Header(default=None)) -> None:
+        if not cfg.auth_required:
+            return  # auth disabled; allow anonymous
+        if not authorization or not authorization.lower().startswith("bearer "):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="missing bearer token",
+                headers={"WWW-Authenticate": 'Bearer realm="yakyoke"'},
+            )
+        provided = authorization.split(" ", 1)[1].strip()
+        if not _secrets.compare_digest(provided, cfg.api_token):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid bearer token",
+                headers={"WWW-Authenticate": 'Bearer realm="yakyoke"'},
+            )
+
+    Auth = Depends(require_auth)
+
     @app.get("/health")
     def health() -> dict[str, Any]:
         return {
@@ -114,9 +139,15 @@ def create_app(config: Config | None = None) -> FastAPI:
             "version": "0.1.0",
             "default_model": cfg.default_model,
             "data_dir": str(cfg.data_dir),
+            "auth_required": cfg.auth_required,
         }
 
-    @app.post("/tasks", response_model=TaskResponse, status_code=201)
+    @app.post(
+        "/tasks",
+        response_model=TaskResponse,
+        status_code=201,
+        dependencies=[Auth],
+    )
     def create_task(req: CreateTaskRequest) -> TaskResponse:
         task = Task(
             prompt=req.prompt,
@@ -129,7 +160,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         storage.create_task(task)
         return TaskResponse.from_task(task)
 
-    @app.get("/tasks", response_model=list[TaskResponse])
+    @app.get("/tasks", response_model=list[TaskResponse], dependencies=[Auth])
     def list_tasks(
         status: str | None = None,
         limit: int = 50,
@@ -143,14 +174,14 @@ def create_app(config: Config | None = None) -> FastAPI:
         tasks = storage.list_tasks(status=status_enum, limit=limit)
         return [TaskResponse.from_task(t) for t in tasks]
 
-    @app.get("/tasks/{task_id}", response_model=TaskResponse)
+    @app.get("/tasks/{task_id}", response_model=TaskResponse, dependencies=[Auth])
     def get_task(task_id: str) -> TaskResponse:
         task = storage.get_task(task_id)
         if task is None:
             raise HTTPException(404, "task not found")
         return TaskResponse.from_task(task)
 
-    @app.delete("/tasks/{task_id}")
+    @app.delete("/tasks/{task_id}", dependencies=[Auth])
     def cancel_task(task_id: str) -> dict[str, Any]:
         task = storage.get_task(task_id)
         if task is None:
@@ -162,7 +193,11 @@ def create_app(config: Config | None = None) -> FastAPI:
         cancelled = queue.cancel(task_id)
         return {"cancelled": cancelled, "id": task_id}
 
-    @app.get("/tasks/{task_id}/trace", response_class=PlainTextResponse)
+    @app.get(
+        "/tasks/{task_id}/trace",
+        response_class=PlainTextResponse,
+        dependencies=[Auth],
+    )
     def get_trace(task_id: str) -> str:
         task = storage.get_task(task_id)
         if task is None:
@@ -171,7 +206,11 @@ def create_app(config: Config | None = None) -> FastAPI:
             return ""
         return task.trace_path.read_text(encoding="utf-8")
 
-    @app.get("/tasks/{task_id}/result", response_class=PlainTextResponse)
+    @app.get(
+        "/tasks/{task_id}/result",
+        response_class=PlainTextResponse,
+        dependencies=[Auth],
+    )
     def get_result(task_id: str) -> str:
         task = storage.get_task(task_id)
         if task is None:

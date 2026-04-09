@@ -38,6 +38,12 @@ class Config:
     # Cap on agent loop iterations to prevent runaway tool-use loops.
     max_agent_steps: int
 
+    # Optional bearer token. If set (non-empty), the daemon requires
+    # `Authorization: Bearer <token>` on all task routes. /health stays open.
+    # If unset or empty, the daemon is unauthenticated -- safe only when
+    # bound to localhost on a single-user machine.
+    api_token: str
+
     @classmethod
     def from_env(cls) -> "Config":
         data_dir = Path(
@@ -51,7 +57,13 @@ class Config:
             host=os.environ.get("YAKYOKE_HOST", "127.0.0.1"),
             port=int(os.environ.get("YAKYOKE_PORT", "8765")),
             max_agent_steps=int(os.environ.get("YAKYOKE_MAX_STEPS", "12")),
+            api_token=os.environ.get("YAKYOKE_API_TOKEN", "").strip(),
         )
+
+    @property
+    def auth_required(self) -> bool:
+        """True if the daemon should enforce bearer auth."""
+        return bool(self.api_token)
 
     @property
     def db_path(self) -> Path:

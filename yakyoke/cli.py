@@ -42,13 +42,45 @@ def _base_url() -> str:
     return f"http://{host}:{port}"
 
 
+def _auth_headers() -> dict[str, str]:
+    """Build the Authorization header from YAKYOKE_API_TOKEN if set.
+
+    The CLI reads the same env var the daemon does. If the daemon has auth
+    enabled and the env var is not set, requests get 401s and we surface a
+    helpful error. If the daemon has auth disabled, sending an Authorization
+    header is harmless (FastAPI ignores it).
+    """
+    token = os.environ.get("YAKYOKE_API_TOKEN", "").strip()
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+    return {}
+
+
 def _client() -> httpx.Client:
-    return httpx.Client(base_url=_base_url(), timeout=30.0)
+    return httpx.Client(
+        base_url=_base_url(),
+        timeout=30.0,
+        headers=_auth_headers(),
+    )
 
 
 def _die(msg: str, code: int = 1) -> None:
     console.print(f"[red]error:[/red] {msg}")
     raise typer.Exit(code)
+
+
+def _explain_http_error(e: httpx.HTTPError) -> str:
+    """Turn an httpx error into a useful message, including the 401 case."""
+    if isinstance(e, httpx.HTTPStatusError):
+        if e.response.status_code == 401:
+            if not os.environ.get("YAKYOKE_API_TOKEN"):
+                return (
+                    "daemon requires auth but YAKYOKE_API_TOKEN is not set in "
+                    "this shell. Set it and retry."
+                )
+            return "daemon rejected the bearer token (check YAKYOKE_API_TOKEN)"
+        return f"daemon returned HTTP {e.response.status_code}: {e.response.text}"
+    return f"daemon request failed: {e}"
 
 
 # ---------- daemon ----------
@@ -103,7 +135,7 @@ def submit(
             r = c.post("/tasks", json=payload)
             r.raise_for_status()
     except httpx.HTTPError as e:
-        _die(f"daemon request failed: {e}")
+        _die(_explain_http_error(e))
 
     task = r.json()
     console.print(f"[green]submitted[/green] {task['id']}")
@@ -149,7 +181,7 @@ def run(
                         break
                     time.sleep(poll)
     except httpx.HTTPError as e:
-        _die(f"daemon request failed: {e}")
+        _die(_explain_http_error(e))
 
     console.print()
     if task["status"] == "done":
@@ -188,7 +220,7 @@ def status(task_id: str = typer.Argument(...)) -> None:
             r = c.get(f"/tasks/{task_id}")
             r.raise_for_status()
     except httpx.HTTPError as e:
-        _die(f"daemon request failed: {e}")
+        _die(_explain_http_error(e))
     console.print_json(data=r.json())
 
 
@@ -206,7 +238,7 @@ def list_tasks(
             r = c.get("/tasks", params=params)
             r.raise_for_status()
     except httpx.HTTPError as e:
-        _die(f"daemon request failed: {e}")
+        _die(_explain_http_error(e))
     tasks = r.json()
     if not tasks:
         console.print("(no tasks)")
@@ -245,7 +277,7 @@ def trace(task_id: str = typer.Argument(...)) -> None:
             r = c.get(f"/tasks/{task_id}/trace")
             r.raise_for_status()
     except httpx.HTTPError as e:
-        _die(f"daemon request failed: {e}")
+        _die(_explain_http_error(e))
     if not r.text:
         console.print("(no trace yet)")
         return
@@ -268,7 +300,7 @@ def result(task_id: str = typer.Argument(...)) -> None:
             r = c.get(f"/tasks/{task_id}/result")
             r.raise_for_status()
     except httpx.HTTPError as e:
-        _die(f"daemon request failed: {e}")
+        _die(_explain_http_error(e))
     console.print(Markdown(r.text))
 
 
@@ -280,13 +312,13 @@ def cancel(task_id: str = typer.Argument(...)) -> None:
             r = c.delete(f"/tasks/{task_id}")
             r.raise_for_status()
     except httpx.HTTPError as e:
-        _die(f"daemon request failed: {e}")
+        _die(_explain_http_error(e))
     console.print(r.json())
 
 
 @app.command()
 def health() -> None:
-    """Check daemon liveness."""
+    """Check daemon liveness. /health is unauthenticated by design."""
     try:
         with _client() as c:
             r = c.get("/health")
@@ -294,6 +326,20 @@ def health() -> None:
     except httpx.HTTPError as e:
         _die(f"daemon not reachable at {_base_url()}: {e}")
     console.print_json(data=r.json())
+
+
+@app.command()
+def token() -> None:
+    """Generate a fresh random bearer token.
+
+    Print a 32-byte URL-safe random token. Copy it into your .env as
+    YAKYOKE_API_TOKEN, restart the daemon, and set the same value in any
+    shell that runs the CLI client.
+    """
+    import secrets as _secrets
+
+    new_token = _secrets.token_urlsafe(32)
+    console.print(new_token)
 
 
 def main() -> None:
