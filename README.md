@@ -186,16 +186,21 @@ changes to tools.
 
 ## Roadmap
 
-| Version | Adds |
-|---|---|
-| **v0.1** | Skeleton: 1 worker, SQLite, LiteLLM, 5 tools, HTTP daemon, CLI |
-| **v0.2** | Worker pool (`yakyoke worker --workers N`), launchd service |
-| **v0.3** | Scheduling, recurring tasks, read-only web UI |
-| **v0.4** | Sandboxed Python execution tool, cost/quality routing |
-| **v0.5** | Task trees: `spawn_task` tool, parent/child coordination |
-| **v0.6** | Memory layer (NanoGraph) for cross-task semantic recall |
-| **v0.7** | Role-based specialized agents (researcher, writer, critic) |
-| **v1.0** | Webhooks, calendar/email triggers, polished docs |
+| Version | Adds | Status |
+|---|---|---|
+| **v0.1** | Skeleton: 1 worker, SQLite, LiteLLM, 5 tools, HTTP daemon, CLI, bearer auth | shipped |
+| **v0.2** | Worker pool (`yakyoke worker --workers N`), launchd / systemd service | planned |
+| **v0.3** | Scheduling, recurring tasks, file watchers, webhooks, read-only web UI | planned |
+| **v0.4** | Sandboxed Python execution tool, cost/quality routing | planned |
+| **v0.5** | Task trees: `spawn_task` tool, parent/child coordination | planned |
+| **v0.6** | Memory layer (NanoGraph) for cross-task semantic recall | planned |
+| **v0.7** | Role-based specialized agents (researcher, writer, critic) | planned |
+| **v1.0** | iOS Shortcuts, Slack, calendar/email triggers, polished docs | planned |
+
+See [ROADMAP.md](ROADMAP.md) for the working document with detail on
+what interfaces are pre-staged for each milestone, what's been validated,
+and what's open. See [CLAUDE.md](CLAUDE.md) for the load-bearing
+architectural rules that future versions must preserve.
 
 ## License
 
